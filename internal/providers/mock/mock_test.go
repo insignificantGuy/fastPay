@@ -10,7 +10,7 @@ import (
 )
 
 func chargeReq() providers.ChargeRequest {
-	return providers.ChargeRequest{PaymentID: "pay_1", Amount: 1000, Currency: "USD"}
+	return providers.ChargeRequest{PaymentID: "pay_1", Amount: 1000, Currency: "USD", IdempotencyKey: "ikey"}
 }
 
 func TestChargeSuccessIsTerminal(t *testing.T) {
@@ -122,5 +122,30 @@ func TestChargeTimeoutHonorsContextCancel(t *testing.T) {
 	_, err := p.Charge(ctx, chargeReq())
 	if err == nil {
 		t.Fatal("expected context error")
+	}
+}
+
+func TestLookupFindsSuccessfulChargeByIdempotencyKey(t *testing.T) {
+	p := mock.New(mock.Config{ID: "a", Available: true, Mode: mock.ModeSuccess})
+	_, err := p.Charge(context.Background(), chargeReq())
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := p.Lookup(context.Background(), "ikey")
+	if err != nil || !got.Found || got.Result.Outcome != providers.OutcomeSuccess {
+		t.Fatalf("lookup=%+v err=%v", got, err)
+	}
+	rep, err := p.Report(context.Background())
+	if err != nil || len(rep) != 1 || rep[0].Status != "succeeded" {
+		t.Fatalf("report=%+v err=%v", rep, err)
+	}
+}
+
+func TestLookupHidesUnsettledTimeout(t *testing.T) {
+	p := mock.New(mock.Config{ID: "a", Available: true, Mode: mock.ModeTimeout, TimeoutDuration: time.Millisecond})
+	_, _ = p.Charge(context.Background(), chargeReq())
+	got, err := p.Lookup(context.Background(), "ikey")
+	if err != nil || got.Found {
+		t.Fatalf("unsettled timeout must not look up as found: %+v", got)
 	}
 }

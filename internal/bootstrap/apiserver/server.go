@@ -9,6 +9,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/insignificantGuy/fastPay/internal/api/payment"
+	"github.com/insignificantGuy/fastPay/internal/providers"
 	"github.com/insignificantGuy/fastPay/internal/providers/mock"
 	paymentrepo "github.com/insignificantGuy/fastPay/internal/repository/payment"
 	"github.com/insignificantGuy/fastPay/internal/routing"
@@ -21,6 +22,7 @@ type Config struct {
 	DatabaseURL string
 	ProviderA   mock.Mode
 	ProviderB   mock.Mode
+	MaxAttempts int
 }
 
 func LoadConfig() Config {
@@ -30,6 +32,7 @@ func LoadConfig() Config {
 		DatabaseURL: envOr("DATABASE_URL", "postgres://fastpay:fastpay@localhost:5432/fastpay?sslmode=disable"),
 		ProviderA:   mock.Mode(envOr("PROVIDER_A_MODE", string(mock.ModeSuccess))),
 		ProviderB:   mock.Mode(envOr("PROVIDER_B_MODE", string(mock.ModeSuccess))),
+		MaxAttempts: 3,
 	}
 }
 
@@ -40,36 +43,35 @@ func Run() error {
 		return fmt.Errorf("open db: %w", err)
 	}
 
-	engine := gin.Default()
-	svc := payment.NewService(paymentrepo.NewRepository(db), newRouter(cfg))
-	svc.Register(engine.Group("/v1"))
-
-	addr := ":" + cfg.Port
-	log.Printf("fastPay listening on %s", addr)
-	return engine.Run(addr)
-}
-
-func newRouter(cfg Config) *routing.Engine {
 	a := mock.New(mock.Config{
-		ID:               "provider-a",
-		Available:        true,
-		Mode:             cfg.ProviderA,
-		TimeoutDuration:  50 * time.Millisecond,
-		LateWebhookDelay: 10 * time.Millisecond,
+		ID: "provider-a", Available: true, Mode: cfg.ProviderA,
+		TimeoutDuration: 50 * time.Millisecond, LateWebhookDelay: 20 * time.Millisecond,
+		LateWebhookSuccess: true,
 	})
 	b := mock.New(mock.Config{
-		ID:               "provider-b",
-		Available:        true,
-		Mode:             cfg.ProviderB,
-		TimeoutDuration:  50 * time.Millisecond,
-		LateWebhookDelay: 10 * time.Millisecond,
+		ID: "provider-b", Available: true, Mode: cfg.ProviderB,
+		TimeoutDuration: 50 * time.Millisecond, LateWebhookDelay: 20 * time.Millisecond,
+		LateWebhookSuccess: true,
 	})
-	return routing.NewEngine(routing.Config{
+	engine := routing.NewEngine(routing.Config{
 		Providers: []routing.WeightedProvider{
 			{Provider: a, Weight: 1},
 			{Provider: b, Weight: 1},
 		},
 	})
+	svc := payment.NewService(paymentrepo.NewRepository(db), engine, payment.Config{
+		MaxAttempts: cfg.MaxAttempts,
+		Providers:   []providers.Provider{a, b},
+	})
+	a.SetOnLateWebhook(func(ev providers.LateWebhookEvent) { _ = svc.HandleWebhookEvent(ev) })
+	b.SetOnLateWebhook(func(ev providers.LateWebhookEvent) { _ = svc.HandleWebhookEvent(ev) })
+
+	r := gin.Default()
+	svc.Register(r.Group("/v1"))
+
+	addr := ":" + cfg.Port
+	log.Printf("fastPay listening on %s", addr)
+	return r.Run(addr)
 }
 
 func envOr(key, fallback string) string {
