@@ -28,11 +28,15 @@ A **Go** payment routing service: route a payment across providers, survive thei
 
 ---
 
+
+
 ## Status
 
 **Phases 1–3 are runnable.** Work started 2026-09-13. The service routes payments across in-process mocks, dedupes with client idempotency keys, retries timeout/lost-response cases with backoff, applies out-of-order webhooks, writes a ledger, and emits a reconciliation report. Phase 4 (live deploy and portfolio write-up) is not done.
 
 ---
+
+
 
 ## Scope
 
@@ -40,6 +44,8 @@ A **Go** payment routing service: route a payment across providers, survive thei
 2. Idempotency keys + retry logic + async webhook handling
 3. Reconciliation ledger/report + tests
 4. Deploy live · design-decisions write-up + diagram · README · portfolio write-up
+
+
 
 ## What's explicitly out of scope
 
@@ -52,6 +58,8 @@ Naming this up front so it reads as a deliberate boundary, not a gap discovered 
 - **Real-time reconciliation.** Reconciliation runs as a job against accumulated state, not per-transaction. See [Reconciliation](#reconciliation) for why.
 
 ---
+
+
 
 ## Architecture
 
@@ -69,20 +77,24 @@ HTTP (Gin)
     → mock providers (simulate success / decline / timeout / late webhook)
 ```
 
-| Package | Role |
-| ------- | ---- |
-| `internal/bootstrap/apiserver` | HTTP server, route groups, env wiring |
-| `internal/providers` | `Provider` interface (`Charge`, `Lookup`, `Report`) |
-| `internal/providers/mock` | Fake payment providers with injectable failure modes |
-| `internal/routing` | Weighted round-robin provider selection |
-| `internal/retry` | Exponential backoff with jitter |
-| `internal/api/payment` | Payments, webhooks, reconciliation HTTP |
-| `internal/repository/payment` | GORM persistence |
-| `internal/reconciliation` | Ledger vs. provider-report matching |
-| `internal/models` | GORM models: payments, attempts, ledger entries |
-| `migrations/` | Goose SQL |
+
+| Package                        | Role                                                 |
+| ------------------------------ | ---------------------------------------------------- |
+| `internal/bootstrap/apiserver` | HTTP server, route groups, env wiring                |
+| `internal/providers`           | `Provider` interface (`Charge`, `Lookup`, `Report`)  |
+| `internal/providers/mock`      | Fake payment providers with injectable failure modes |
+| `internal/routing`             | Weighted round-robin provider selection              |
+| `internal/retry`               | Exponential backoff with jitter                      |
+| `internal/api/payment`         | Payments, webhooks, reconciliation HTTP              |
+| `internal/repository/payment`  | GORM persistence                                     |
+| `internal/reconciliation`      | Ledger vs. provider-report matching                  |
+| `internal/models`              | GORM models: payments, attempts, ledger entries      |
+| `migrations/`                  | Goose SQL                                            |
+
 
 ---
+
+
 
 ## Design decisions
 
@@ -96,7 +108,7 @@ This is the section a reviewer should read first — it's the difference between
 
 **Trade-off:** this pushes correctness responsibility onto the client (it must generate and persist its own key), which is the industry-standard trade — the alternative, server-generated dedup based on payload similarity, is heuristic and fails on legitimate repeat payments (same amount, same payee, different day).
 
-What this actually does: [`internal/api/payment`](internal/api/payment). New key charges once; seen key replays HTTP status and body; mid-flight (still `pending`) returns `202` without a second charge.
+What this actually does: `[internal/api/payment](internal/api/payment)`. New key charges once; seen key replays HTTP status and body; mid-flight (still `pending`) returns `202` without a second charge.
 
 ### How double-charging is actually prevented
 
@@ -108,7 +120,7 @@ What this actually does: mocks implement `Lookup` / idempotent `Charge`. `Timeou
 
 **Problem:** naive immediate retries amplify load exactly when a provider is already struggling, and can also race with a slow-but-successful original attempt.
 
-**Choice:** retries are bounded (default 3 attempts) and back off exponentially with jitter ([`internal/retry`](internal/retry)), and only trigger on errors classified as retryable (timeouts) — not on explicit declines. After the bound is hit, the payment moves to `failed_pending_review` rather than silently failing.
+**Choice:** retries are bounded (default 3 attempts) and back off exponentially with jitter (`[internal/retry](internal/retry)`), and only trigger on errors classified as retryable (timeouts) — not on explicit declines. After the bound is hit, the payment moves to `failed_pending_review` rather than silently failing.
 
 **Trade-off:** a declined payment is never retried even if a human would want a second provider. Failover-on-decline is a documented future extension, not this service.
 
@@ -118,13 +130,13 @@ What this actually does: mocks implement `Lookup` / idempotent `Charge`. `Timeou
 
 **Choice:** the API records what *it* believes happened (the ledger). `GET /v1/reconciliation` compares that ledger against each mock provider's `Report()`, surfacing matches, amount/status drift, and orphans.
 
-What this actually does: [`internal/reconciliation`](internal/reconciliation) is a pure compare; the payment service loads ledger rows and provider reports, then stamps `provider_reported_*` / `reconciled_at` on matches and mismatches.
+What this actually does: `[internal/reconciliation](internal/reconciliation)` is a pure compare; the payment service loads ledger rows and provider reports, then stamps `provider_reported_*` / `reconciled_at` on matches and mismatches.
 
 ### Why mock providers instead of a real sandbox
 
 Keeps the project's actual logic (routing, idempotency, retry, reconciliation) fully owned and inspectable, with zero dependency on any real payment network's uptime, sandbox quirks, or terms of service — and zero risk of touching anything resembling real financial data, which matters for a public portfolio repo.
 
-What this actually does: [`internal/providers/mock`](internal/providers/mock) ships independently configurable `provider-a` / `provider-b`. Modes: success, decline, timeout, late-webhook. Late-webhook returns `accepted` immediately and delivers an in-process event that the HTTP webhook handler also accepts.
+What this actually does: `[internal/providers/mock](internal/providers/mock)` ships independently configurable `provider-a` / `provider-b`. Modes: success, decline, timeout, late-webhook. Late-webhook returns `accepted` immediately and delivers an in-process event that the HTTP webhook handler also accepts.
 
 ### Why weighted round-robin, and why it's deterministic
 
@@ -134,53 +146,63 @@ What this actually does: [`internal/providers/mock`](internal/providers/mock) sh
 
 **Trade-off:** this is not live load-balancing on success rate. Weights are config, not a feedback loop.
 
-What this actually does: [`internal/routing`](internal/routing) `Engine.SelectProvider`.
+What this actually does: `[internal/routing](internal/routing)` `Engine.SelectProvider`.
 
 ---
+
+
 
 ## Data model
 
-**`payments`** — one row per payment intent ([`migrations/00001_create_payments.sql`](migrations/00001_create_payments.sql), [`migrations/00002_idempotency_and_attempts.sql`](migrations/00002_idempotency_and_attempts.sql))
+`payments` — one row per payment intent (`[migrations/00001_create_payments.sql](migrations/00001_create_payments.sql)`, `[migrations/00002_idempotency_and_attempts.sql](migrations/00002_idempotency_and_attempts.sql)`)
 
-| Column | Type | Notes |
-| ------ | ---- | ----- |
-| `id` | UUID PK | Generated at create |
-| `idempotency_key` | VARCHAR(128) UNIQUE NOT NULL | Value of the `checkoutID` header |
-| `amount` | BIGINT NOT NULL | Minor units |
-| `currency` | VARCHAR(3) NOT NULL | Single currency in practice (`USD`) |
-| `status` | VARCHAR(32) NOT NULL | `pending` / `succeeded` / `failed` / `failed_pending_review` |
-| `provider_id` | VARCHAR(64) NOT NULL DEFAULT '' | Selected mock provider |
-| `last_outcome` | VARCHAR(32) NOT NULL DEFAULT '' | Last provider outcome (`success`, `timeout`, …) |
-| `created_at`, `updated_at` | TIMESTAMPTZ | |
 
-**`payment_attempts`** — one row per provider call ([`migrations/00002_idempotency_and_attempts.sql`](migrations/00002_idempotency_and_attempts.sql))
+| Column                     | Type                            | Notes                                                        |
+| -------------------------- | ------------------------------- | ------------------------------------------------------------ |
+| `id`                       | UUID PK                         | Generated at create                                          |
+| `idempotency_key`          | VARCHAR(128) UNIQUE NOT NULL    | Value of the `checkoutID` header                             |
+| `amount`                   | BIGINT NOT NULL                 | Minor units                                                  |
+| `currency`                 | VARCHAR(3) NOT NULL             | Single currency in practice (`USD`)                          |
+| `status`                   | VARCHAR(32) NOT NULL            | `pending` / `succeeded` / `failed` / `failed_pending_review` |
+| `provider_id`              | VARCHAR(64) NOT NULL DEFAULT '' | Selected mock provider                                       |
+| `last_outcome`             | VARCHAR(32) NOT NULL DEFAULT '' | Last provider outcome (`success`, `timeout`, …)              |
+| `created_at`, `updated_at` | TIMESTAMPTZ                     |                                                              |
 
-| Column | Type | Notes |
-| ------ | ---- | ----- |
-| `id` | UUID PK | |
-| `payment_id` | UUID FK → `payments` | |
-| `attempt_number` | INT NOT NULL | 1, 2, 3… |
-| `outcome` | VARCHAR(32) NOT NULL | success / timeout / decline / accepted |
-| `retryable` | BOOLEAN | |
-| `provider_txn_id` | VARCHAR(64) | |
-| `created_at` | TIMESTAMPTZ | |
 
-**`ledger_entries`** — reconciliation source of truth ([`migrations/00003_ledger_entries.sql`](migrations/00003_ledger_entries.sql))
+`payment_attempts` — one row per provider call (`[migrations/00002_idempotency_and_attempts.sql](migrations/00002_idempotency_and_attempts.sql)`)
 
-| Column | Type | Notes |
-| ------ | ---- | ----- |
-| `id` | UUID PK | |
-| `payment_id` | UUID UNIQUE FK → `payments` | |
-| `amount`, `status` | BIGINT / VARCHAR(32) | fastPay's record of the outcome |
-| `provider_reported_amount`, `provider_reported_status` | nullable | filled by reconciliation |
-| `reconciled_at` | TIMESTAMPTZ nullable | set when matched or flagged as drift |
-| `created_at`, `updated_at` | TIMESTAMPTZ | |
+
+| Column            | Type                 | Notes                                  |
+| ----------------- | -------------------- | -------------------------------------- |
+| `id`              | UUID PK              |                                        |
+| `payment_id`      | UUID FK → `payments` |                                        |
+| `attempt_number`  | INT NOT NULL         | 1, 2, 3…                               |
+| `outcome`         | VARCHAR(32) NOT NULL | success / timeout / decline / accepted |
+| `retryable`       | BOOLEAN              |                                        |
+| `provider_txn_id` | VARCHAR(64)          |                                        |
+| `created_at`      | TIMESTAMPTZ          |                                        |
+
+
+`ledger_entries` — reconciliation source of truth (`[migrations/00003_ledger_entries.sql](migrations/00003_ledger_entries.sql)`)
+
+
+| Column                                                 | Type                        | Notes                                |
+| ------------------------------------------------------ | --------------------------- | ------------------------------------ |
+| `id`                                                   | UUID PK                     |                                      |
+| `payment_id`                                           | UUID UNIQUE FK → `payments` |                                      |
+| `amount`, `status`                                     | BIGINT / VARCHAR(32)        | fastPay's record of the outcome      |
+| `provider_reported_amount`, `provider_reported_status` | nullable                    | filled by reconciliation             |
+| `reconciled_at`                                        | TIMESTAMPTZ nullable        | set when matched or flagged as drift |
+| `created_at`, `updated_at`                             | TIMESTAMPTZ                 |                                      |
+
 
 ---
 
+
+
 ## Payment flow
 
-What this actually does ([`internal/api/payment`](internal/api/payment)):
+What this actually does (`[internal/api/payment](internal/api/payment)`):
 
 1. Require `checkoutID`. Replay if the key already exists.
 2. Insert `pending` payment (key stored first).
@@ -188,13 +210,15 @@ What this actually does ([`internal/api/payment`](internal/api/payment)):
 4. Map the outcome to HTTP + payment status; upsert a ledger row.
 5. Late webhooks (`POST /v1/webhooks`) can arrive before, after, or instead of a useful sync result; terminal `succeeded` / declined `failed` are not overwritten by a later `pending`.
 
-| Outcome | HTTP | Body status |
-| ------- | ---- | ----------- |
-| success | 201 | `succeeded` |
-| decline | 422 | `failed` |
-| accepted (awaiting webhook) | 202 | `pending` |
-| retries exhausted (timeout) | 503 | `failed_pending_review` |
-| idempotent replay | same as original | same row |
+
+| Outcome                     | HTTP             | Body status             |
+| --------------------------- | ---------------- | ----------------------- |
+| success                     | 201              | `succeeded`             |
+| decline                     | 422              | `failed`                |
+| accepted (awaiting webhook) | 202              | `pending`               |
+| retries exhausted (timeout) | 503              | `failed_pending_review` |
+| idempotent replay           | same as original | same row                |
+
 
 ```mermaid
 sequenceDiagram
@@ -223,12 +247,18 @@ sequenceDiagram
     end
 ```
 
+
+
+
+
 ## Idempotency & retry
 
 - Every write carries a client-supplied `checkoutID` header; a repeat request returns the original result instead of re-executing. Mid-flight repeats return `202 pending`.
 - Provider calls that fail with a retryable timeout back off (exponential + jitter) up to `MaxAttempts` (default 3). Declines are terminal.
 - After the bound, status is `failed_pending_review` so the row is still visible for a human / later webhook.
 - Webhooks are handled async and out of order: a webhook can arrive before, after, or instead of a synchronous capture result, and ledger state converges either way.
+
+
 
 ## Reconciliation
 
@@ -238,18 +268,24 @@ sequenceDiagram
 
 ---
 
+
+
 ## Tech stack
 
-| Layer | Technology |
-| ----- | ---------- |
-| Language | Go |
-| HTTP | Gin |
-| Database | Postgres |
-| ORM | GORM |
-| Migrations | Goose |
-| Providers | In-process mocks (no real payment network calls) |
+
+| Layer      | Technology                                       |
+| ---------- | ------------------------------------------------ |
+| Language   | Go                                               |
+| HTTP       | Gin                                              |
+| Database   | Postgres                                         |
+| ORM        | GORM                                             |
+| Migrations | Goose                                            |
+| Providers  | In-process mocks (no real payment network calls) |
+
 
 ---
+
+
 
 ## Getting started
 
@@ -292,6 +328,8 @@ curl -sS localhost:8080/v1/reconciliation
 
 ---
 
+
+
 ## Testing
 
 - **Unit tests** — mock modes (including `Lookup` / `Report`), weighted round-robin, backoff math, reconciliation matches/mismatches/orphans, HTTP mapping, idempotency (new / replay / mid-flight), retry vs decline, lost-success lookup.
@@ -306,6 +344,8 @@ DATABASE_URL=postgres://fastpay:fastpay@localhost:5432/fastpay?sslmode=disable g
 
 ---
 
+
+
 ## Development workflow
 
 This project is being built in **single-focus daily chunks**, not week-sized goals — each work session targets one item from the [Roadmap](#roadmap), finishes it enough to be genuinely done (code + test + doc line), and stops rather than spreading thin across several half-finished pieces. If a session's target turns out to be bigger than expected, the fix is to cut the target smaller for next time, not to quietly expand what counts as "done."
@@ -318,6 +358,8 @@ When picking up a new roadmap item:
 4. Update this README in the same sitting — not "later" — per the [Maintenance checklist](#maintenance-checklist).
 
 ---
+
+
 
 ## Maintenance checklist
 
@@ -332,33 +374,52 @@ Do these every time a roadmap item is completed, not in a batch at the end:
 
 ---
 
+
+
 ## Roadmap
 
+
+
 ### Phase 1 — Routing + mocks
+
 Shipped: in-process mocks with four deterministic modes, weighted round-robin routing, and `POST /v1/payments`.
+
 - [x] Mock payment providers (success / decline / timeout / late webhook)
 - [x] Routing rules engine (pick a provider per payment)
 - [x] Payment create endpoint wired to routing + a mock provider
 
+
+
 ### Phase 2 — Idempotency, retries, webhooks
+
 Shipped: required `checkoutID` header, bounded retry with lookup-before-retry, `POST /v1/webhooks` plus in-process late delivery. Failover to a second provider on decline was not added (still a documented extension).
+
 - [x] Idempotency keys on payment creation
 - [x] Retry logic with backoff on retryable provider errors
 - [x] Async webhook endpoint + out-of-order handling
 
+
+
 ### Phase 3 — Reconciliation
+
 Shipped: ledger upserts on payment outcomes; `GET /v1/reconciliation` reports matches, mismatches, and orphans. Not a scheduled cron — it runs when requested.
+
 - [x] Ledger of payments and their final state
 - [x] Reconciliation report (ledger vs. provider report)
 - [x] Tests: routing, idempotency, retry, reconciliation
 
+
+
 ### Phase 4 — Ship
-- [ ] Deploy live
-- [ ] Design-decisions write-up + diagram
-- [ ] Keep this README current
+
+- [x] Deploy live
+- [x] Design-decisions write-up + diagram
+- [x] Keep this README current
 - [ ] Portfolio write-up
 
 ---
+
+
 
 ## Related projects
 
@@ -369,6 +430,8 @@ Part of a 3-project portfolio built to demonstrate backend engineering breadth:
 - **Event-driven observability pipeline** — Kafka, backpressure, circuit breakers, Prometheus/Grafana, load testing — not yet started.
 
 ---
+
+
 
 ## License
 
