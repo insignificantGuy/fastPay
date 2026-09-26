@@ -311,22 +311,22 @@ func (s *Service) Register(rg *gin.RouterGroup) {
 	rg.POST("/payments", s.Create)
 	rg.POST("/webhooks", s.HandleWebhook)
 	rg.GET("/reconciliation", s.Reconcile)
-	// Health endpoints. /healthz is a liveness probe (the process is up);
-	// /readyz is a readiness probe (the process is up AND the database is reachable).
-	rg.GET("/healthz", s.Healthz)
-	rg.GET("/readyz", s.Readyz)
+	// Health endpoints. /healthy is a liveness probe (the process is up);
+	// /ready is a readiness probe (the process is up AND the database is reachable).
+	rg.GET("/healthy", s.Healthy)
+	rg.GET("/ready", s.Ready)
 }
 
-// Healthz is a liveness probe: 200 OK if the process is running, regardless of
+// Healthy is a liveness probe: 200 OK if the process is running, regardless of
 // the database. Suitable for restart-on-failure checks.
-func (s *Service) Healthz(c *gin.Context) {
+func (s *Service) Healthy(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"status": "ok"})
 }
 
-// Readyz is a readiness probe: 200 OK only if the database is reachable, so a
+// Ready is a readiness probe: 200 OK only if the database is reachable, so a
 // load balancer / platform can stop routing traffic before the service is
 // actually able to serve requests.
-func (s *Service) Readyz(c *gin.Context) {
+func (s *Service) Ready(c *gin.Context) {
 	if err := s.store.Ping(c.Request.Context()); err != nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"status": "not ready", "error": err.Error()})
 		return

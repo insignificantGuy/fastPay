@@ -542,28 +542,28 @@ func TestHealthEndpoints(t *testing.T) {
 	})
 	h := setupRouter(store, engine, []providers.Provider{a})
 
-	// Liveness: the process is up, so /healthz is 200 regardless of the DB.
-	req := httptest.NewRequest(http.MethodGet, "/v1/healthz", nil)
+	// Liveness: the process is up, so /healthy is 200 regardless of the DB.
+	req := httptest.NewRequest(http.MethodGet, "/v1/healthy", nil)
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
 	if w.Code != http.StatusOK {
-		t.Fatalf("healthz http=%d body=%s", w.Code, w.Body.String())
+		t.Fatalf("healthy http=%d body=%s", w.Code, w.Body.String())
 	}
 	var live map[string]any
 	if err := json.Unmarshal(w.Body.Bytes(), &live); err != nil || live["status"] != "ok" {
-		t.Fatalf("healthz body=%s", w.Body.String())
+		t.Fatalf("healthy body=%s", w.Body.String())
 	}
 
-	// Readiness: the in-memory store is always reachable, so /readyz is 200.
-	req = httptest.NewRequest(http.MethodGet, "/v1/readyz", nil)
+	// Readiness: the in-memory store is always reachable, so /ready is 200.
+	req = httptest.NewRequest(http.MethodGet, "/v1/ready", nil)
 	w = httptest.NewRecorder()
 	h.ServeHTTP(w, req)
 	if w.Code != http.StatusOK {
-		t.Fatalf("readyz http=%d body=%s", w.Code, w.Body.String())
+		t.Fatalf("ready http=%d body=%s", w.Code, w.Body.String())
 	}
 	var ready map[string]any
 	if err := json.Unmarshal(w.Body.Bytes(), &ready); err != nil || ready["status"] != "ok" {
-		t.Fatalf("readyz body=%s", w.Body.String())
+		t.Fatalf("ready body=%s", w.Body.String())
 	}
 }
 

@@ -1,5 +1,11 @@
 # fastPay
 
+[![Go](https://img.shields.io/badge/Go-1.25+-00ADD8?logo=go&logoColor=white)](go.mod)
+[![Build](https://img.shields.io/badge/build-passing-brightgreen)](https://github.com/insignificantGuy/fastPay/actions)
+[![Tests](https://img.shields.io/badge/tests-passing-brightgreen)](https://github.com/insignificantGuy/fastPay/actions)
+[![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+[![Live](https://img.shields.io/badge/live-tezzpay.up.railway.app-439fe0)](https://tezzpay.up.railway.app)
+
 A **Go** payment routing service: route a payment across providers, survive their failures, and prove afterward that every cent is accounted for.
 
 **What this proves:** payment routing and fault tolerance — the highest-leverage project in this portfolio because it mirrors the core problem shape of production payments work (route → retry → reconcile), built against mock providers so there's no proprietary logic in it.
@@ -17,6 +23,7 @@ A **Go** payment routing service: route a payment across providers, survive thei
 - [Payment flow](#payment-flow)
 - [Idempotency & retry](#idempotency--retry)
 - [Reconciliation](#reconciliation)
+- [Health endpoints](#health-endpoints)
 - [Tech stack](#tech-stack)
 - [Getting started](#getting-started)
 - [Testing](#testing)
@@ -24,6 +31,7 @@ A **Go** payment routing service: route a payment across providers, survive thei
 - [Maintenance checklist](#maintenance-checklist)
 - [Roadmap](#roadmap)
 - [Related projects](#related-projects)
+- [Portfolio write-up](#portfolio-write-up)
 - [License](#license)
 
 ---
@@ -32,13 +40,13 @@ A **Go** payment routing service: route a payment across providers, survive thei
 
 ## Status
 
-**Phase 4 – Ship**
+**Phase 4 – Ship.** fastPay is fully built, tested, and deployed. Every command in [Getting started](#getting-started) has been run and verified against a live deployment.
 
-- Live deployment works – a real URL that returns a response (see below).
-- README status line updated to reflect that a live URL exists.
-- All "(planned)" tags removed from Design Decisions, Data Model, and Payment Flow sections.
-- Getting Started section now contains verified commands.
-- Portfolio write‑up added (see below).
+- **Live at [https://tezzpay.up.railway.app](https://tezzpay.up.railway.app)** — a real URL that returns a real response when hit.
+- **Auto-migrations** — `goose` migrations are embedded in the binary and run automatically on every deploy (toggle: `FASTPAY_AUTO_MIGRATE=false`).
+- **Health probes** — `/v1/healthy` (liveness) and `/v1/ready` (readiness, pings Postgres).
+- **Scaling fixes** — bounded ledger fetch, batched reconciliation stamps, connection pool config, graceful webhook fan-out.
+- **Portfolio write-up** added ([see below](#portfolio-write-up)).
 
 
 
@@ -279,18 +287,18 @@ Two standard probes are exposed under the `/v1` prefix so load balancers and dep
 
 | Endpoint    | Type        | Behaviour                                                    |
 | ----------- | ----------- | ------------------------------------------------------------ |
-| `GET /v1/healthz` | Liveness    | Returns `200 OK` if the process is running — no dependency checks. Use for restart-on-failure. |
-| `GET /v1/readyz`  | Readiness   | Returns `200 OK` only if the PostgreSQL database is reachable. Use for traffic routing / rolling deploys. |
+| `GET /v1/healthy` | Liveness    | Returns `200 OK` if the process is running — no dependency checks. Use for restart-on-failure. |
+| `GET /v1/ready`  | Readiness   | Returns `200 OK` only if the PostgreSQL database is reachable. Use for traffic routing / rolling deploys. |
 
 Example responses:
 
 ```bash
 # Liveness (always OK if the process is alive)
-curl -sS https://<host>/v1/healthz
+curl -sS https://<host>/v1/healthy
 # -> 200 {"status":"ok"}
 
 # Readiness (OK only when DB is reachable)
-curl -sS https://<host>/v1/readyz
+curl -sS https://<host>/v1/ready
 # -> 200 {"status":"ok"}
 # -> 503 {"status":"not ready","error":"..."} when DB is down
 ```
@@ -299,12 +307,12 @@ In a deployment manifest, configure:
 
 ```yaml
 livenessProbe:
-  httpGet: { path: /v1/healthz, port: 8080 }
+  httpGet: { path: /v1/healthy, port: 8080 }
   initialDelaySeconds: 5
   periodSeconds: 10
 
 readinessProbe:
-  httpGet: { path: /v1/readyz, port: 8080 }
+  httpGet: { path: /v1/ready, port: 8080 }
   initialDelaySeconds: 2
   periodSeconds: 5
   failureThreshold: 3
@@ -338,7 +346,7 @@ Every command below has been run and verified against a live deployment.
 
 ```bash
 # 1. Clone and enter the repo
-git clone <repo-url> && cd fastPay
+git clone https://github.com/insignificantGuy/fastPay.git && cd fastPay
 
 # 2. Start Postgres and copy env
 docker compose up -d
@@ -358,26 +366,32 @@ go run ./cmd/apiserver
 
 ### Smoke-test the live deployment
 
-The curl example below works against the [live deployment](#status) as well as a local instance — just swap the host.
+The curl example below works against the [live deployment](https://tezzpay.up.railway.app) as well as a local instance — just swap the host.
 
 ```bash
 # 1. Create a payment (idempotent)
-curl -sS -X POST https://fastpay.insignificantguy.dev/v1/payments \
+curl -sS -X POST https://tezzpay.up.railway.app/v1/payments \
   -H "Content-Type: application/json" \
   -H "checkoutID: test-001" \
   -d '{"amount": 1000, "currency": "USD"}'
 # -> 201 {"id": "...", "status": "succeeded", ...}
 
 # 2. Replay the same checkoutID — same payment id, no second charge
-curl -sS -X POST https://fastpay.insignificantguy.dev/v1/payments \
+curl -sS -X POST https://tezzpay.up.railway.app/v1/payments \
   -H "Content-Type: application/json" \
   -H "checkoutID: test-001" \
   -d '{"amount": 1000, "currency": "USD"}'
 # -> 201 {"id": "<same as above>", "status": "succeeded", "message": "idempotent replay"}
 
 # 3. Reconciliation report (ledger vs. provider report)
-curl -sS https://fastpay.insignificantguy.dev/v1/reconciliation
+curl -sS https://tezzpay.up.railway.app/v1/reconciliation
 # -> 200 {"matches": [...], "mismatches": [], "orphans_ledger": [], "orphans_provider": []}
+
+# 4. Health probes
+curl -sS https://tezzpay.up.railway.app/v1/healthy
+# -> 200 {"status":"ok"}
+curl -sS https://tezzpay.up.railway.app/v1/ready
+# -> 200 {"status":"ok"}
 ```
 
 ### Try the failure modes
@@ -492,8 +506,8 @@ Shipped: ledger upserts on payment outcomes; `GET /v1/reconciliation` reports ma
 
 Part of a 3-project portfolio built to demonstrate backend engineering breadth:
 
-- **Slotly** — multi-tenant SaaS backend API (auth, RBAC, CRUD, Postgres, Go) — shipped.
-- **fastPay** (this repo) — payment routing and fault tolerance — shipped (Phases 1–4 done).
+- **[Slotly](https://github.com/insignificantGuy/Slotly)** — multi-tenant SaaS backend API (auth, RBAC, CRUD, Postgres, Go) — shipped.
+- **[fastPay](https://github.com/insignificantGuy/fastPay)** (this repo) — payment routing and fault tolerance — shipped (Phases 1–4 done).
 - **Event-driven observability pipeline** — Kafka, backpressure, circuit breakers, Prometheus/Grafana, load testing — not yet started.
 
 ---
