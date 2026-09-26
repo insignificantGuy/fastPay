@@ -1,7 +1,9 @@
 package payment
 
 import (
+	"context"
 	"errors"
+	"time"
 
 	"github.com/insignificantGuy/fastPay/internal/models"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -9,6 +11,14 @@ import (
 )
 
 var ErrDuplicateIdempotencyKey = errors.New("duplicate idempotency key")
+
+// LedgerStamp is one reconciliation stamp: the provider's view of a payment,
+// applied to fastPay's ledger row in a single batched transaction.
+type LedgerStamp struct {
+	PaymentID      string
+	ProviderAmount int64
+	ProviderStatus string
+}
 
 type Repository struct {
 	db *gorm.DB
@@ -93,10 +103,49 @@ func (r *Repository) GetLedger(paymentID string) (*models.LedgerEntry, error) {
 	return &e, nil
 }
 
-func (r *Repository) ListLedger() ([]models.LedgerEntry, error) {
+// ListLedger returns at most limit ledger rows, newest first.
+// limit <= 0 means "return everything" (use only for small datasets).
+func (r *Repository) ListLedger(ctx context.Context, limit int) ([]models.LedgerEntry, error) {
 	var rows []models.LedgerEntry
-	err := r.db.Find(&rows).Error
+	q := r.db.WithContext(ctx).Order("created_at DESC, id DESC")
+	if limit > 0 {
+		q = q.Limit(limit)
+	}
+	err := q.Find(&rows).Error
 	return rows, err
+}
+
+// ReconcileStamps stamps provider-reported amounts/statuses onto ledger rows
+// and marks them reconciled, in a single transaction per call.
+// A nil/empty slice is a no-op. Stamps with an empty PaymentID are ignored.
+func (r *Repository) ReconcileStamps(ctx context.Context, stamps []LedgerStamp) error {
+	if len(stamps) == 0 {
+		return nil
+	}
+	now := time.Now().UTC()
+	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		for _, s := range stamps {
+			if s.PaymentID == "" {
+				continue
+			}
+			var existing models.LedgerEntry
+			if err := tx.First(&existing, "payment_id = ?", s.PaymentID).Error; err != nil {
+				if errors.Is(err, gorm.ErrRecordNotFound) {
+					continue
+				}
+				return err
+			}
+			ps := s.ProviderStatus
+			pa := s.ProviderAmount
+			existing.ProviderReportedStatus = &ps
+			existing.ProviderReportedAmount = &pa
+			existing.ReconciledAt = &now
+			if err := tx.Save(&existing).Error; err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 }
 
 func isUniqueViolation(err error) bool {

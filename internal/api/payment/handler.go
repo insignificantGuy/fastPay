@@ -25,7 +25,8 @@ type Store interface {
 	ListAttempts(paymentID string) ([]models.PaymentAttempt, error)
 	UpsertLedger(e *models.LedgerEntry) error
 	GetLedger(paymentID string) (*models.LedgerEntry, error)
-	ListLedger() ([]models.LedgerEntry, error)
+	ListLedger(ctx context.Context, limit int) ([]models.LedgerEntry, error)
+	ReconcileStamps(ctx context.Context, stamps []paymentrepo.LedgerStamp) error
 }
 
 type Router interface {
@@ -33,11 +34,12 @@ type Router interface {
 }
 
 type Config struct {
-	MaxAttempts int
-	BaseBackoff time.Duration
-	Jitter      time.Duration
-	Sleep       func(ctx context.Context, d time.Duration) error
-	Providers   []providers.Provider
+	MaxAttempts    int
+	BaseBackoff    time.Duration
+	Jitter         time.Duration
+	Sleep          func(ctx context.Context, d time.Duration) error
+	Providers      []providers.Provider
+	ReconcileLimit int // 0 = no limit (small datasets only); production should set a cap
 }
 
 type Service struct {
@@ -249,7 +251,8 @@ func (s *Service) Reconcile(c *gin.Context) {
 }
 
 func (s *Service) RunReconciliation(ctx context.Context) (reconciliation.Report, error) {
-	ledgers, err := s.store.ListLedger()
+	limit := s.cfg.ReconcileLimit
+	ledgers, err := s.store.ListLedger(ctx, limit)
 	if err != nil {
 		return reconciliation.Report{}, err
 	}
@@ -267,28 +270,24 @@ func (s *Service) RunReconciliation(ctx context.Context) (reconciliation.Report,
 	}
 	report := reconciliation.Compare(rows, processed)
 
-	now := time.Now().UTC()
-	apply := func(items []reconciliation.Item, matched bool) {
-		for _, item := range items {
-			entry, _ := s.store.GetLedger(item.PaymentID)
-			if entry == nil {
-				continue
-			}
-			if item.ProviderStatus != "" {
-				st := item.ProviderStatus
-				amt := item.ProviderAmount
-				entry.ProviderReportedStatus = &st
-				entry.ProviderReportedAmount = &amt
-			}
-			if matched || item.Reason == "amount or status drift" {
-				t := now
-				entry.ReconciledAt = &t
-			}
-			_ = s.store.UpsertLedger(entry)
-		}
+	// Stamp reconciled_at + provider_reported_* on every ledger row that has a
+	// counterpart on the provider side (match or drift). Ledger-only orphans have
+	// nothing to compare against and stay unreconciled. All stamps are applied in
+	// a single batched transaction instead of one UPDATE per row (N+1).
+	stamps := make([]paymentrepo.LedgerStamp, 0, len(report.Matches)+len(report.Mismatches))
+	for _, item := range report.Matches {
+		stamps = append(stamps, paymentrepo.LedgerStamp{
+			PaymentID: item.PaymentID, ProviderAmount: item.ProviderAmount, ProviderStatus: item.ProviderStatus,
+		})
 	}
-	apply(report.Matches, true)
-	apply(report.Mismatches, false)
+	for _, item := range report.Mismatches {
+		stamps = append(stamps, paymentrepo.LedgerStamp{
+			PaymentID: item.PaymentID, ProviderAmount: item.ProviderAmount, ProviderStatus: item.ProviderStatus,
+		})
+	}
+	if err := s.store.ReconcileStamps(ctx, stamps); err != nil {
+		return reconciliation.Report{}, err
+	}
 	return report, nil
 }
 

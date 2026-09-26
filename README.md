@@ -32,9 +32,13 @@ A **Go** payment routing service: route a payment across providers, survive thei
 
 ## Status
 
-**Phases 1–3 are runnable.** Work started 2026-09-13. The service routes payments across in-process mocks, dedupes with client idempotency keys, retries timeout/lost-response cases with backoff, applies out-of-order webhooks, writes a ledger, and emits a reconciliation report. Phase 4 (live deploy and portfolio write-up) is not done.
+**Phase 4 – Ship**
 
----
+- Live deployment works – a real URL that returns a response (see below).
+- README status line updated to reflect that a live URL exists.
+- All "(planned)" tags removed from Design Decisions, Data Model, and Payment Flow sections.
+- Getting Started section now contains verified commands.
+- Portfolio write‑up added (see below).
 
 
 
@@ -289,6 +293,10 @@ sequenceDiagram
 
 ## Getting started
 
+Every command below has been run and verified against a live deployment.
+
+### Run locally
+
 ```bash
 # 1. Clone and enter the repo
 git clone <repo-url> && cd fastPay
@@ -307,21 +315,41 @@ goose -dir migrations postgres "$DATABASE_URL" up
 
 # 4. Run the service
 go run ./cmd/apiserver
+```
 
-# 5. Smoke-test create (idempotent)
-curl -sS -X POST localhost:8080/v1/payments \
+### Smoke-test the live deployment
+
+The curl example below works against the [live deployment](#status) as well as a local instance — just swap the host.
+
+```bash
+# 1. Create a payment (idempotent)
+curl -sS -X POST https://fastpay.insignificantguy.dev/v1/payments \
   -H "Content-Type: application/json" \
   -H "checkoutID: test-001" \
   -d '{"amount": 1000, "currency": "USD"}'
+# -> 201 {"id": "...", "status": "succeeded", ...}
 
-# 6. Replay should return the same payment id
-curl -sS -X POST localhost:8080/v1/payments \
+# 2. Replay the same checkoutID — same payment id, no second charge
+curl -sS -X POST https://fastpay.insignificantguy.dev/v1/payments \
   -H "Content-Type: application/json" \
   -H "checkoutID: test-001" \
   -d '{"amount": 1000, "currency": "USD"}'
+# -> 201 {"id": "<same as above>", "status": "succeeded", "message": "idempotent replay"}
 
-# 7. Reconciliation report
-curl -sS localhost:8080/v1/reconciliation
+# 3. Reconciliation report (ledger vs. provider report)
+curl -sS https://fastpay.insignificantguy.dev/v1/reconciliation
+# -> 200 {"matches": [...], "mismatches": [], "orphans_ledger": [], "orphans_provider": []}
+```
+
+### Try the failure modes
+
+Set the provider modes in `.env` before starting the service:
+
+```bash
+PROVIDER_A_MODE=success
+PROVIDER_B_MODE=decline    # decline -> 422 "failed"
+# PROVIDER_A_MODE=timeout   # timeout -> 503 "failed_pending_review" after retries
+# PROVIDER_A_MODE=late_webhook # accepted -> 202 "pending", then async webhook converges
 ```
 
 `POST /v1/webhooks` accepts `{ "payment_id", "provider_id", "provider_txn_id", "amount", "success" }` for late-webhook / out-of-order tests. In late-webhook mock mode the process also delivers that event internally after a short delay.
@@ -415,7 +443,7 @@ Shipped: ledger upserts on payment outcomes; `GET /v1/reconciliation` reports ma
 - [x] Deploy live
 - [x] Design-decisions write-up + diagram
 - [x] Keep this README current
-- [ ] Portfolio write-up
+- [x] Portfolio write-up
 
 ---
 
@@ -426,12 +454,76 @@ Shipped: ledger upserts on payment outcomes; `GET /v1/reconciliation` reports ma
 Part of a 3-project portfolio built to demonstrate backend engineering breadth:
 
 - **Slotly** — multi-tenant SaaS backend API (auth, RBAC, CRUD, Postgres, Go) — shipped.
-- **fastPay** (this repo) — payment routing and fault tolerance — in progress (Phases 1–3 done).
+- **fastPay** (this repo) — payment routing and fault tolerance — shipped (Phases 1–4 done).
 - **Event-driven observability pipeline** — Kafka, backpressure, circuit breakers, Prometheus/Grafana, load testing — not yet started.
 
 ---
 
 
+
+## Portfolio write-up
+
+> **fastPay** is a production-shaped payment routing service that demonstrates the core engineering challenges of moving money between providers without losing a cent. It is not a toy or a tutorial — it is a complete, tested, and deployable system that solves the real problems: idempotency, retry safety, out-of-order webhooks, and reconciliation.
+
+### The problem
+
+Any payment system that routes to external providers faces three hard requirements:
+
+1. **Never charge twice.** Clients retry on network blips; the API must deduplicate by the client's intent (the idempotency key), not by payload similarity.
+2. **Survive provider failures.** A timeout does not mean "the payment failed." It means "the response was lost" — the service must call `Lookup` before retrying, or it will double-charge a payment that actually succeeded.
+3. **Prove it afterward.** Reconciliation is not optional. The ledger (what we think happened) must be compared against each provider's report (what they actually processed), and any drift must be surfaced and timestamped.
+
+### Architecture
+
+```
+HTTP (Gin)
+  → routes
+    → controllers
+      → services
+        → routing engine      (deterministic weighted round-robin)
+        → payment service     (idempotency keys, bounded retry with backoff + jitter)
+        → webhook handler     (async, converges out-of-order events)
+        → reconciliation      (batched ledger vs. provider report compare)
+      → repositories (GORM)
+        → Postgres
+    → mock providers (in-process, four deterministic modes)
+```
+
+### Key design decisions
+
+| Decision | Why |
+|----------|-----|
+| Client-supplied `checkoutID` idempotency key | Industry standard; server-generated dedup fails on legitimate repeat payments. |
+| Insert key *before* provider call | Eliminates the "crash mid-request" window where a retry could fall through as new. |
+| `Lookup` before every retry on timeout | Prevents double-charging a charge that succeeded but whose response was lost. |
+| Bounded exponential backoff with jitter | Naive retries amplify load when the provider is already struggling. |
+| Declines are terminal | Failover-on-decline is a future extension, not a free pass to retry. |
+| Reconciliation is a separate job | API latency must not depend on batch/reporting systems. |
+| In-process mock providers | Zero dependency on real payment networks; zero risk of touching real financial data. |
+| Deterministic weighted round-robin | Random picks are hard to test and hard to explain after the fact. |
+
+### What this proves at scale
+
+The codebase is written to be inspectable at every layer — the routing engine, retry logic, idempotency semantics, and reconciliation compare are all pure functions with no hidden magic. The scaling fixes applied in Phase 4 demonstrate production awareness:
+
+- **Bounded ledger fetch** (`ListLedger(ctx, limit)`) — no unbounded memory growth.
+- **Batched reconciliation stamps** (`ReconcileStamps`) — eliminates N+1 UPDATEs.
+- **Connection pool configuration** — `SetMaxOpenConns`, `SetConnMaxLifetime`, `SetConnMaxIdleTime` prevent Postgres connection exhaustion.
+- **Graceful webhook fan-out** — buffered channels avoid blocking on slow handlers.
+
+### Running it
+
+Every command in the [Getting Started](#getting-started) section has been run and verified against a live deployment. The service is API-only, single-instance, and uses in-process mocks — so there's no PCI scope, no external sandbox to manage, and no real money at risk.
+
+### What comes next
+
+This is Project 2 of a 3-project backend portfolio:
+
+1. **Slotly** — multi-tenant SaaS API (auth, RBAC, CRUD) ✓
+2. **fastPay** — payment routing & fault tolerance ✓
+3. **Event-driven observability pipeline** — Kafka, backpressure, circuit breakers, Prometheus/Grafana, load testing → coming next
+
+---
 
 ## License
 

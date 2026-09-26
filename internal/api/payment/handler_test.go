@@ -22,6 +22,8 @@ import (
 	"gorm.io/gorm"
 )
 
+func init() { _ = context.Background; _ = paymentrepo.LedgerStamp{} }
+
 type memStore struct {
 	mu       sync.Mutex
 	byID     map[string]*models.Payment
@@ -118,14 +120,39 @@ func (m *memStore) GetLedger(paymentID string) (*models.LedgerEntry, error) {
 	return &cp, nil
 }
 
-func (m *memStore) ListLedger() ([]models.LedgerEntry, error) {
+func (m *memStore) ListLedger(ctx context.Context, limit int) ([]models.LedgerEntry, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	var out []models.LedgerEntry
+	out := make([]models.LedgerEntry, 0, len(m.ledger))
 	for _, e := range m.ledger {
 		out = append(out, *e)
 	}
+	sortLedger(out)
+	if limit > 0 && len(out) > limit {
+		out = out[:limit]
+	}
 	return out, nil
+}
+
+func (m *memStore) ReconcileStamps(ctx context.Context, stamps []paymentrepo.LedgerStamp) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	now := time.Now().UTC()
+	for _, s := range stamps {
+		if s.PaymentID == "" {
+			continue
+		}
+		e, ok := m.ledger[s.PaymentID]
+		if !ok {
+			continue
+		}
+		ps := s.ProviderStatus
+		pa := s.ProviderAmount
+		e.ProviderReportedStatus = &ps
+		e.ProviderReportedAmount = &pa
+		e.ReconciledAt = &now
+	}
+	return nil
 }
 
 func noopSleep(_ context.Context, _ time.Duration) error { return nil }
@@ -392,9 +419,15 @@ func TestReconciliationReport(t *testing.T) {
 		Providers: []routing.WeightedProvider{{Provider: a, Weight: 1}},
 	})
 	h := setupRouter(store, engine, []providers.Provider{a})
-	postPayment(t, h, 1000, "recon-1")
+	w := postPayment(t, h, 1000, "recon-1")
+	var created struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &created); err != nil {
+		t.Fatal(err)
+	}
 
-	// seed a ledger-only orphan and a mismatch
+	// seed a ledger-only orphan and a mismatch (drift the payment's amount to 1)
 	_ = store.UpsertLedger(&models.LedgerEntry{PaymentID: "orphan-l", Amount: 1, Status: "succeeded"})
 	for _, e := range store.ledger {
 		if e.PaymentID != "orphan-l" {
@@ -404,7 +437,7 @@ func TestReconciliationReport(t *testing.T) {
 	}
 
 	req := httptest.NewRequest(http.MethodGet, "/v1/reconciliation", nil)
-	w := httptest.NewRecorder()
+	w = httptest.NewRecorder()
 	h.ServeHTTP(w, req)
 	if w.Code != http.StatusOK {
 		t.Fatalf("http=%d %s", w.Code, w.Body.String())
@@ -423,6 +456,91 @@ func TestReconciliationReport(t *testing.T) {
 	}
 	if len(rep.OrphansLedger) < 1 {
 		t.Fatalf("expected ledger orphan, report=%s", w.Body.String())
+	}
+
+	// Reconciliation must have stamped provider_reported_* and reconciled_at on the
+	// drifted row (batched, not one UPDATE per row).
+	led, _ := store.GetLedger(created.ID)
+	if led == nil || led.ProviderReportedStatus == nil || *led.ProviderReportedStatus != "succeeded" {
+		t.Fatalf("drifted row not stamped: %+v", led)
+	}
+	if led.ReconciledAt == nil {
+		t.Fatalf("drifted row not marked reconciled: %+v", led)
+	}
+	// The ledger-only orphan must NOT be stamped (nothing to compare against).
+	orphanLed, _ := store.GetLedger("orphan-l")
+	if orphanLed != nil && orphanLed.ReconciledAt != nil {
+		t.Fatalf("ledger-only orphan should not be reconciled: %+v", orphanLed)
+	}
+}
+
+func TestReconciliationIsBoundedAndBatched(t *testing.T) {
+	store := newMemStore()
+	a := mock.New(mock.Config{ID: "a", Available: true, Mode: mock.ModeSuccess})
+	engine := routing.NewEngine(routing.Config{
+		Providers: []routing.WeightedProvider{{Provider: a, Weight: 1}},
+	})
+
+	// Seed 5 ledger rows, only 2 of which the provider actually processed.
+	for i := 1; i <= 5; i++ {
+		_ = store.UpsertLedger(&models.LedgerEntry{
+			PaymentID: "seed-" + itoa(i), Amount: int64(i * 100), Status: "succeeded",
+		})
+	}
+	// provider-a processed seed-1 and seed-2
+	_, _ = a.Charge(context.Background(), providers.ChargeRequest{
+		PaymentID: "seed-1", Amount: 100, Currency: "USD", IdempotencyKey: "k1",
+	})
+	_, _ = a.Charge(context.Background(), providers.ChargeRequest{
+		PaymentID: "seed-2", Amount: 200, Currency: "USD", IdempotencyKey: "k2",
+	})
+
+	// Reconcile with a cap of 2 — the report must never exceed the cap.
+	svc := payment.NewService(store, engine, payment.Config{
+		MaxAttempts: 1, Providers: []providers.Provider{a}, ReconcileLimit: 2,
+	})
+	rep, err := svc.RunReconciliation(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := len(rep.Matches) + len(rep.Mismatches) + len(rep.OrphansLedger) + len(rep.OrphansProvider); got > 2 {
+		t.Fatalf("report grew beyond the cap: %d items", got)
+	}
+
+	// The two stamped rows must carry reconciled_at.
+	stamped := 0
+	for _, id := range []string{"seed-1", "seed-2"} {
+		led, _ := store.GetLedger(id)
+		if led != nil && led.ReconciledAt != nil {
+			stamped++
+		}
+	}
+	if stamped != 2 {
+		t.Fatalf("expected 2 stamped rows, got %d", stamped)
+	}
+}
+
+func TestReconcileStampsIsNoOpWhenEmpty(t *testing.T) {
+	store := newMemStore()
+	if err := store.ReconcileStamps(context.Background(), nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ReconcileStamps(context.Background(), []paymentrepo.LedgerStamp{}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func itoa(n int) string {
+	return "0123456789"[n : n+1]
+}
+
+// sortLedger orders rows by payment id so a bounded ListLedger is deterministic
+// (map iteration order is random). The real repo orders by created_at/id.
+func sortLedger(rows []models.LedgerEntry) {
+	for i := 1; i < len(rows); i++ {
+		for j := i; j > 0 && rows[j-1].PaymentID > rows[j].PaymentID; j-- {
+			rows[j-1], rows[j] = rows[j], rows[j-1]
+		}
 	}
 }
 

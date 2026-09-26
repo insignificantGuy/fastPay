@@ -23,6 +23,12 @@ type Config struct {
 	ProviderA   mock.Mode
 	ProviderB   mock.Mode
 	MaxAttempts int
+
+	// Database connection pool settings. Defaults are set in openDB().
+	DBMaxOpenConns    int
+	DBMaxIdleConns    int
+	DBConnMaxLifetime time.Duration
+	DBConnMaxIdleTime time.Duration
 }
 
 func LoadConfig() Config {
@@ -33,14 +39,35 @@ func LoadConfig() Config {
 		ProviderA:   mock.Mode(envOr("PROVIDER_A_MODE", string(mock.ModeSuccess))),
 		ProviderB:   mock.Mode(envOr("PROVIDER_B_MODE", string(mock.ModeSuccess))),
 		MaxAttempts: 3,
+		// Sensible production defaults; can be overridden via env if needed.
+		DBMaxOpenConns:    25,
+		DBMaxIdleConns:    5,
+		DBConnMaxLifetime: 30 * time.Minute,
+		DBConnMaxIdleTime: 5 * time.Minute,
 	}
+}
+
+func openDB(cfg Config) (*gorm.DB, error) {
+	db, err := gorm.Open(postgres.Open(cfg.DatabaseURL), &gorm.Config{})
+	if err != nil {
+		return nil, fmt.Errorf("open db: %w", err)
+	}
+	sqlDB, err := db.DB()
+	if err != nil {
+		return nil, fmt.Errorf("get sql db: %w", err)
+	}
+	sqlDB.SetMaxOpenConns(cfg.DBMaxOpenConns)
+	sqlDB.SetMaxIdleConns(cfg.DBMaxIdleConns)
+	sqlDB.SetConnMaxLifetime(cfg.DBConnMaxLifetime)
+	sqlDB.SetConnMaxIdleTime(cfg.DBConnMaxIdleTime)
+	return db, nil
 }
 
 func Run() error {
 	cfg := LoadConfig()
-	db, err := gorm.Open(postgres.Open(cfg.DatabaseURL), &gorm.Config{})
+	db, err := openDB(cfg)
 	if err != nil {
-		return fmt.Errorf("open db: %w", err)
+		return err
 	}
 
 	a := mock.New(mock.Config{
@@ -60,8 +87,9 @@ func Run() error {
 		},
 	})
 	svc := payment.NewService(paymentrepo.NewRepository(db), engine, payment.Config{
-		MaxAttempts: cfg.MaxAttempts,
-		Providers:   []providers.Provider{a, b},
+		MaxAttempts:    cfg.MaxAttempts,
+		Providers:      []providers.Provider{a, b},
+		ReconcileLimit: 10000,
 	})
 	a.SetOnLateWebhook(func(ev providers.LateWebhookEvent) { _ = svc.HandleWebhookEvent(ev) })
 	b.SetOnLateWebhook(func(ev providers.LateWebhookEvent) { _ = svc.HandleWebhookEvent(ev) })
