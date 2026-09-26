@@ -1,6 +1,7 @@
 package apiserver
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"os"
@@ -67,6 +68,10 @@ func Run() error {
 	cfg := LoadConfig()
 	db, err := openDB(cfg)
 	if err != nil {
+		return err
+	}
+	if err := autoMigrate(context.Background(), cfg.DatabaseURL); err != nil {
+		log.Printf("[error] auto-migrate failed: %v", err)
 		return err
 	}
 

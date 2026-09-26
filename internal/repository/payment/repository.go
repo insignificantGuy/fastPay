@@ -105,6 +105,11 @@ func (r *Repository) GetLedger(paymentID string) (*models.LedgerEntry, error) {
 
 // ListLedger returns at most limit ledger rows, newest first.
 // limit <= 0 means "return everything" (use only for small datasets).
+// Ping verifies the database is reachable. Used by the readiness endpoint.
+func (r *Repository) Ping(ctx context.Context) error {
+	return r.db.WithContext(ctx).Raw("SELECT 1").Error
+}
+
 func (r *Repository) ListLedger(ctx context.Context, limit int) ([]models.LedgerEntry, error) {
 	var rows []models.LedgerEntry
 	q := r.db.WithContext(ctx).Order("created_at DESC, id DESC")

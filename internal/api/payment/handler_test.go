@@ -155,6 +155,10 @@ func (m *memStore) ReconcileStamps(ctx context.Context, stamps []paymentrepo.Led
 	return nil
 }
 
+func (m *memStore) Ping(ctx context.Context) error {
+	return nil // in-memory store is always ready
+}
+
 func noopSleep(_ context.Context, _ time.Duration) error { return nil }
 
 func setupRouter(store payment.Store, engine *routing.Engine, providersList []providers.Provider) *gin.Engine {
@@ -527,6 +531,39 @@ func TestReconcileStampsIsNoOpWhenEmpty(t *testing.T) {
 	}
 	if err := store.ReconcileStamps(context.Background(), []paymentrepo.LedgerStamp{}); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestHealthEndpoints(t *testing.T) {
+	store := newMemStore()
+	a := mock.New(mock.Config{ID: "a", Available: true, Mode: mock.ModeSuccess})
+	engine := routing.NewEngine(routing.Config{
+		Providers: []routing.WeightedProvider{{Provider: a, Weight: 1}},
+	})
+	h := setupRouter(store, engine, []providers.Provider{a})
+
+	// Liveness: the process is up, so /healthz is 200 regardless of the DB.
+	req := httptest.NewRequest(http.MethodGet, "/v1/healthz", nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("healthz http=%d body=%s", w.Code, w.Body.String())
+	}
+	var live map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &live); err != nil || live["status"] != "ok" {
+		t.Fatalf("healthz body=%s", w.Body.String())
+	}
+
+	// Readiness: the in-memory store is always reachable, so /readyz is 200.
+	req = httptest.NewRequest(http.MethodGet, "/v1/readyz", nil)
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("readyz http=%d body=%s", w.Code, w.Body.String())
+	}
+	var ready map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &ready); err != nil || ready["status"] != "ok" {
+		t.Fatalf("readyz body=%s", w.Body.String())
 	}
 }
 

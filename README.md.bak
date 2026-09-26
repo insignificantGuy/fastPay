@@ -273,45 +273,6 @@ sequenceDiagram
 ---
 
 
-## Health endpoints
-
-Two standard probes are exposed under the `/v1` prefix so load balancers and deployment platforms can safely route traffic only to healthy instances.
-
-| Endpoint    | Type        | Behaviour                                                    |
-| ----------- | ----------- | ------------------------------------------------------------ |
-| `GET /v1/healthz` | Liveness    | Returns `200 OK` if the process is running — no dependency checks. Use for restart-on-failure. |
-| `GET /v1/readyz`  | Readiness   | Returns `200 OK` only if the PostgreSQL database is reachable. Use for traffic routing / rolling deploys. |
-
-Example responses:
-
-```bash
-# Liveness (always OK if the process is alive)
-curl -sS https://<host>/v1/healthz
-# -> 200 {"status":"ok"}
-
-# Readiness (OK only when DB is reachable)
-curl -sS https://<host>/v1/readyz
-# -> 200 {"status":"ok"}
-# -> 503 {"status":"not ready","error":"..."} when DB is down
-```
-
-In a deployment manifest, configure:
-
-```yaml
-livenessProbe:
-  httpGet: { path: /v1/healthz, port: 8080 }
-  initialDelaySeconds: 5
-  periodSeconds: 10
-
-readinessProbe:
-  httpGet: { path: /v1/readyz, port: 8080 }
-  initialDelaySeconds: 2
-  periodSeconds: 5
-  failureThreshold: 3
-```
-
----
-
 
 ## Tech stack
 
